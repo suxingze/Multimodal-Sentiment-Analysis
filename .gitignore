@@ -1,3 +1,8 @@
 aligned_mosei.pkl
+*.pyc
 /data/
 /ckpt/
+__pycache__/
+__pycache__/*
+nn_models/__pycache__/
+nn_models/__pycache__/*

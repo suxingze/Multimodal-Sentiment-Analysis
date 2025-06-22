@@ -89,7 +89,7 @@ class Fusion(nn.Module):
         self.audio_out_dim = self.audio_hidden
 
         # define the post fusion layers
-        if self.fusion_type == 'concat':
+        if self.fusion_type == 'simple':
 
             self.fc1 = nn.Linear(self.text_out_dim + self.video_out_dim + self.audio_out_dim, self.post_fusion_dim)
             self.fc2 = nn.Linear(self.post_fusion_dim, output_size)
@@ -125,12 +125,17 @@ class Fusion(nn.Module):
         text_x = torch.mean(text_x, dim=0, keepdim=True).squeeze()
         text_h = self.text_subnet(text_x)
 
-        batch_size = lengths_x.size(0)
+        batch_size = lengths_x.size(0) # lengths_x is a tensor of shape (batch_size,) 
 
         if audio_h.is_cuda:
             DTYPE = torch.cuda.FloatTensor
         else:
             DTYPE = torch.FloatTensor
+        
+        # in TFN we are doing a regression with constrained output range: (-3, 3), hence we'll apply sigmoid to output
+        # shrink it to (0, 1), and scale\shift it back to range (-3, 3)
+        self.output_range = torch.FloatTensor([6]).type(DTYPE)
+        self.output_shift = torch.FloatTensor([-3]).type(DTYPE)
 
         if self.fusion_type == 'concat':
             h = torch.cat((text_h, video_h, audio_h), dim=1)
@@ -142,19 +147,28 @@ class Fusion(nn.Module):
             return o
 
         elif self.fusion_type == 'tfn':
-            # Tensor Fusion Network fusion
+           # next we perform "tensor fusion", which is essentially appending 1s to the tensors and take Kronecker product
             _audio_h = torch.cat((torch.ones((batch_size, 1), requires_grad=False).type(DTYPE), audio_h), dim=1)
             _video_h = torch.cat((torch.ones((batch_size, 1), requires_grad=False).type(DTYPE), video_h), dim=1)
             _text_h = torch.cat((torch.ones((batch_size, 1), requires_grad=False).type(DTYPE), text_h), dim=1)
 
+            # _audio_h has shape (batch_size, audio_in + 1), _video_h has shape (batch_size, _video_in + 1)
+            # we want to perform outer product between the two batch, hence we unsqueenze them to get
+            # (batch_size, audio_in + 1, 1) X (batch_size, 1, video_in + 1)
+            # fusion_tensor will have shape (batch_size, audio_in + 1, video_in + 1)
             fusion_tensor = torch.bmm(_audio_h.unsqueeze(2), _video_h.unsqueeze(1))
-            fusion_tensor = fusion_tensor.view(-1, (self.audio_out_dim + 1) * (self.video_out_dim + 1), 1)
+            
+            # next we do kronecker product between fusion_tensor and _text_h. This is even trickier
+            # we have to reshape the fusion tensor during the computation
+            # in the end we don't keep the 3-D tensor, instead we flatten it
+            fusion_tensor = fusion_tensor.view(-1, (self.audio_out_dim + 1) * (self.video_out_dim + 1), 1) 
             fusion_tensor = torch.bmm(fusion_tensor, _text_h.unsqueeze(1)).view(batch_size, -1)
-
+    
             post_fusion_dropped = self.post_fusion_dropout(fusion_tensor)
             post_fusion_y_1 = F.relu(self.post_fusion_layer_1(post_fusion_dropped))
             post_fusion_y_2 = F.relu(self.post_fusion_layer_2(post_fusion_y_1))
-            o = self.post_fusion_layer_3(post_fusion_y_2)
+            post_fusion_y_3 = F.sigmoid(self.post_fusion_layer_3(post_fusion_y_2))
+            o = post_fusion_y_3 * self.output_range + self.output_shift
             return o
 
         else:
