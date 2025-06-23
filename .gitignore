@@ -6,3 +6,5 @@ __pycache__/
 __pycache__/*
 nn_models/__pycache__/
 nn_models/__pycache__/*
+result/
+result/*
